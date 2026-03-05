@@ -27,7 +27,7 @@ interface FileHandlesDB extends DBSchema {
 const DB_NAME = "office-db";
 const DB_VERSION = 2; // Incremented version for schema update
 const STORE_NAME = "filehandles-store";
-const MAX_RECENT_FILES = 20;
+const MAX_RECENT_FILES = 200;
 
 let dbInstance: IDBPDatabase<FileHandlesDB> | null = null;
 

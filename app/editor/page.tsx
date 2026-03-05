@@ -7,6 +7,9 @@ import io, { MockSocket } from "@/utils/editor/socket";
 import { createFetchProxy } from "@/utils/editor/fetch";
 import { createXHRProxy } from "@/utils/editor/xhr";
 import { DocEditor } from "@/utils/editor/types";
+import { ChatPanel } from "@/components/chat/chat-panel";
+import { PermissionControls } from "@/components/permission/permission-controls";
+import { useWebSocketStore } from "@/lib/websocket/store";
 
 const APP_ROOT = process.env.NEXT_PUBLIC_APP_ROOT || "/v9.3.0.24-1";
 
@@ -15,6 +18,12 @@ export default function Page({ params }: { params: Promise<{}> }) {
   const language = useResolvedLanguage();
   const theme = useAppStore((state) => state.theme);
   const isDirty = useRef(false);
+
+  // WebSocket 状态
+  const connectionStatus = useWebSocketStore((state) => state.status);
+  const messages = useWebSocketStore((state) => state.messages);
+  const reconnect = useWebSocketStore((state) => state.reconnect);
+  const sendMessage = useWebSocketStore((state) => state.sendMessage);
 
   useEffect(() => {
     const handleBeforeUnload = (e: BeforeUnloadEvent) => {
@@ -228,15 +237,35 @@ export default function Page({ params }: { params: Promise<{}> }) {
   }, []);
 
   return (
-    <div>
-      <div className="w-screen h-screen">
-        <div id="placeholder">
-          <iframe
-            className="w-0 h-0 hidden"
-            src={APP_ROOT + "/web-apps/apps/api/documents/preload.html"}
-          ></iframe>
+    <div className="flex w-screen h-screen">
+      {/* 左侧文档编辑区 */}
+      <div className="flex-1 h-full flex flex-col">
+        {/* 权限控制栏 */}
+        <div className="flex items-center justify-between px-4 h-12 bg-background border-b border-border shrink-0">
+          <div className="flex items-center gap-2">
+            <span className="text-sm font-medium text-muted-foreground">Agent 权限</span>
+            <PermissionControls showLabels={true} />
+          </div>
+        </div>
+        
+        {/* 文档编辑器 */}
+        <div className="flex-1 h-full">
+          <div id="placeholder">
+            <iframe
+              className="w-0 h-0 hidden"
+              src={APP_ROOT + "/web-apps/apps/api/documents/preload.html"}
+            ></iframe>
+          </div>
         </div>
       </div>
+
+      {/* 右侧会话窗口 */}
+      <ChatPanel
+        connectionStatus={connectionStatus}
+        messages={messages}
+        onSendMessage={sendMessage}
+        onReconnect={reconnect}
+      />
     </div>
   );
 }
