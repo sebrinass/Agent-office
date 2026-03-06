@@ -1,0 +1,53 @@
+# Dependencies
+node_modules
+.pnpm-store
+
+# Build output (we build inside Docker)
+.next
+out
+
+# Development files
+*.log
+*.pid
+*.seed
+*.pid.lock
+
+# IDE
+.idea
+.vscode
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Git
+.git
+.gitignore
+
+# Docker (avoid recursive)
+Dockerfile
+docker-compose*.yml
+.dockerignore
+
+# Test files
+**/*.test.ts
+**/*.test.tsx
+**/*.spec.ts
+**/*.spec.tsx
+__tests__
+coverage
+
+# Documentation
+*.md
+!README.md
+
+# Environment files (should be passed via docker-compose)
+.env
+.env.*
+!.env.example
+
+# Misc
+.eslintcache
+*.tsbuildinfo

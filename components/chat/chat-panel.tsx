@@ -18,7 +18,7 @@ interface ChatPanelProps {
   // 是否正在发送
   isSending?: boolean;
   // 事件回调
-  onSendMessage?: (content: string) => void;
+  onSendMessage?: (content: string) => Promise<boolean>;
   onReconnect?: () => void;
 }
 
@@ -40,9 +40,14 @@ export function ChatPanel({
 
   // 处理发送消息
   const handleSendMessage = useCallback(
-    (content: string) => {
-      onSendMessage?.(content);
-      toast.success("消息已发送", { duration: 1500 });
+    async (content: string): Promise<boolean> => {
+      const success = await onSendMessage?.(content);
+      if (success) {
+        toast.success("消息已发送", { duration: 1500 });
+      } else {
+        toast.error("消息发送失败", { duration: 2000 });
+      }
+      return success ?? false;
     },
     [onSendMessage]
   );

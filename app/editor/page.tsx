@@ -24,6 +24,7 @@ export default function Page({ params }: { params: Promise<{}> }) {
   const messages = useWebSocketStore((state) => state.messages);
   const reconnect = useWebSocketStore((state) => state.reconnect);
   const sendMessage = useWebSocketStore((state) => state.sendMessage);
+  const isSending = useWebSocketStore((state) => state.isSending);
 
   useEffect(() => {
     const handleBeforeUnload = (e: BeforeUnloadEvent) => {
@@ -263,6 +264,7 @@ export default function Page({ params }: { params: Promise<{}> }) {
       <ChatPanel
         connectionStatus={connectionStatus}
         messages={messages}
+        isSending={isSending}
         onSendMessage={sendMessage}
         onReconnect={reconnect}
       />

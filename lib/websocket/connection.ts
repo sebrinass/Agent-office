@@ -1,12 +1,5 @@
-/**
- * WebSocket 连接管理器
- * 负责与 OpenClaw Gateway 建立 WebSocket 连接
- * 支持断线重连、心跳保活、连接状态管理
- */
-
 import type { AgentConnectionStatus } from '@/types/agent';
 
-// 连接配置
 export interface ConnectionConfig {
   url: string;
   token?: string;
@@ -17,16 +10,14 @@ export interface ConnectionConfig {
   connectTimeout?: number;
 }
 
-// 连接事件回调
 export interface ConnectionCallbacks {
   onStatusChange?: (status: AgentConnectionStatus) => void;
   onMessage?: (data: unknown) => void;
   onError?: (error: Error) => void;
-  onConnect?: () => void;
+  onConnect?: (helloPayload: unknown) => void;
   onDisconnect?: (reason: string) => void;
 }
 
-// 默认配置
 const DEFAULT_CONFIG: Partial<ConnectionConfig> = {
   reconnect: true,
   reconnectInterval: 1000,
@@ -35,15 +26,20 @@ const DEFAULT_CONFIG: Partial<ConnectionConfig> = {
   connectTimeout: 10000,
 };
 
-// WebSocket 连接状态
-type WSReadyState = typeof WebSocket.CONNECTING | typeof WebSocket.OPEN | typeof WebSocket.CLOSING | typeof WebSocket.CLOSED;
+function generateId(): string {
+  return Math.random().toString(36).substring(2, 15) + Math.random().toString(36).substring(2, 15);
+}
 
 /**
- * WebSocket 连接管理器类
- * 实现断线重连（指数退避）、心跳保活、连接状态管理
+ * HTTP API 连接类
+ * 使用 HTTP API + SSE 流式响应替代 WebSocket
+ * 
+ * 连接流程：
+ * 1. connect() -> GET /api/office-website/stream (SSE)
+ * 2. send() -> POST /api/office-website/message
+ * 3. 断线重连 -> 指数退避
  */
-export class WebSocketConnection {
-  private ws: WebSocket | null = null;
+export class HttpConnection {
   private config: ConnectionConfig;
   private callbacks: ConnectionCallbacks;
   private status: AgentConnectionStatus = 'disconnected';
@@ -52,23 +48,37 @@ export class WebSocketConnection {
   private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
   private connectTimer: ReturnType<typeof setTimeout> | null = null;
   private isManualClose = false;
+  private abortController: AbortController | null = null;
+  private sessionId: string | null = null;
   private lastHeartbeatResponse = 0;
+  private baseUrl: string = '';
 
   constructor(config: ConnectionConfig, callbacks: ConnectionCallbacks = {}) {
     this.config = { ...DEFAULT_CONFIG, ...config };
     this.callbacks = callbacks;
+    this.parseBaseUrl();
   }
 
   /**
-   * 获取当前连接状态
+   * 解析基础 URL（从 WebSocket URL 转换为 HTTP URL）
    */
+  private parseBaseUrl(): void {
+    let url = this.config.url;
+    // ws:// -> http://, wss:// -> https://
+    if (url.startsWith('ws://')) {
+      url = url.replace('ws://', 'http://');
+    } else if (url.startsWith('wss://')) {
+      url = url.replace('wss://', 'https://');
+    }
+    // 移除末尾的 /ws 或 /websocket
+    url = url.replace(/\/(ws|websocket)$/i, '');
+    this.baseUrl = url;
+  }
+
   getStatus(): AgentConnectionStatus {
     return this.status;
   }
 
-  /**
-   * 更新连接状态并触发回调
-   */
   private setStatus(newStatus: AgentConnectionStatus): void {
     if (this.status !== newStatus) {
       this.status = newStatus;
@@ -77,11 +87,10 @@ export class WebSocketConnection {
   }
 
   /**
-   * 连接到 Gateway
-   * Token 不再通过 URL 传递，而是在连接建立后通过消息发送
+   * 建立 SSE 连接
    */
   connect(): void {
-    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+    if (this.status === 'connected' || this.status === 'connecting') {
       return;
     }
 
@@ -89,71 +98,225 @@ export class WebSocketConnection {
     this.setStatus('connecting');
     this.clearTimers();
 
-    try {
-      // 不再在 URL 中传递 Token，直接使用原始 URL
-      this.ws = new WebSocket(this.config.url);
-      this.setupEventHandlers();
-      this.setupConnectTimeout();
-    } catch (error) {
-      this.handleError(error instanceof Error ? error : new Error(String(error)));
+    // 生成会话 ID
+    if (!this.sessionId) {
+      this.sessionId = `session-${Date.now()}-${generateId()}`;
     }
+
+    this.startSSEConnection();
   }
 
   /**
-   * 设置 WebSocket 事件处理器
+   * 启动 SSE 连接
    */
-  private setupEventHandlers(): void {
-    if (!this.ws) return;
+  private async startSSEConnection(): Promise<void> {
+    try {
+      this.abortController = new AbortController();
+      
+      // 构建请求 URL
+      const streamUrl = `${this.baseUrl}/api/office-website/stream?sessionId=${encodeURIComponent(this.sessionId!)}`;
+      
+      // 设置连接超时
+      this.setupConnectTimeout();
 
-    this.ws.onopen = () => {
+      // 发起 SSE 请求
+      const response = await fetch(streamUrl, {
+        method: 'GET',
+        headers: {
+          'Accept': 'text/event-stream',
+          'Cache-Control': 'no-cache',
+          ...(this.config.token ? { 'Authorization': `Bearer ${this.config.token}` } : {}),
+        },
+        signal: this.abortController.signal,
+      });
+
       this.clearConnectTimeout();
+
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+      }
+
+      if (!response.body) {
+        throw new Error('Response body is null');
+      }
+
+      // 连接成功
       this.reconnectAttempts = 0;
       this.setStatus('connected');
       this.startHeartbeat();
+      
+      // 触发连接回调
+      this.callbacks.onConnect?.({
+        sessionId: this.sessionId,
+        type: 'hello-ok',
+      });
 
-      // 连接建立后发送 Token 认证消息（如果配置了 Token）
-      if (this.config.token) {
-        this.sendAuthMessage(this.config.token);
+      // 处理 SSE 流
+      await this.handleSSEStream(response.body);
+
+    } catch (error) {
+      this.clearConnectTimeout();
+      
+      if (this.isManualClose) {
+        return;
       }
 
-      this.callbacks.onConnect?.();
-    };
+      const err = error instanceof Error ? error : new Error(String(error));
+      
+      // 用户取消不报错
+      if (err.name === 'AbortError') {
+        return;
+      }
 
-    this.ws.onmessage = (event) => {
-      this.handleMessage(event.data);
-    };
-
-    this.ws.onerror = (event) => {
-      this.handleError(new Error('WebSocket error'));
-    };
-
-    this.ws.onclose = (event) => {
-      this.handleClose(event.code, event.reason);
-    };
-  }
-
-  /**
-   * 发送认证消息
-   * Token 通过连接后的第一条消息传递，而非 URL 参数
-   */
-  private sendAuthMessage(token: string): void {
-    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
-
-    try {
-      const authMessage = {
-        type: 'auth',
-        token: token,
-        timestamp: Date.now(),
-      };
-      this.ws.send(JSON.stringify(authMessage));
-    } catch {
-      // 发送失败，忽略错误
+      this.handleError(err);
+      this.handleDisconnect(err.message);
     }
   }
 
   /**
-   * 设置连接超时
+   * 处理 SSE 流
    */
+  private async handleSSEStream(body: ReadableStream<Uint8Array>): Promise<void> {
+    const reader = body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        
+        if (done) {
+          break;
+        }
+
+        buffer += decoder.decode(value, { stream: true });
+        
+        // 解析 SSE 事件
+        const lines = buffer.split('\n');
+        buffer = lines.pop() || ''; // 保留未完成的行
+
+        let eventType = '';
+        let eventData = '';
+
+        for (const line of lines) {
+          if (line.startsWith('event:')) {
+            eventType = line.substring(6).trim();
+          } else if (line.startsWith('data:')) {
+            eventData = line.substring(5).trim();
+          } else if (line === '' && eventData) {
+            // 空行表示事件结束
+            this.handleSSEEvent(eventType, eventData);
+            eventType = '';
+            eventData = '';
+          }
+        }
+      }
+    } finally {
+      reader.releaseLock();
+    }
+  }
+
+  /**
+   * 处理 SSE 事件
+   */
+  private handleSSEEvent(eventType: string, data: string): void {
+    try {
+      // 心跳事件
+      if (eventType === 'tick' || eventType === 'heartbeat' || eventType === 'ping') {
+        this.lastHeartbeatResponse = Date.now();
+        return;
+      }
+
+      // 解析 JSON 数据
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(data);
+      } catch {
+        parsed = data;
+      }
+
+      // 触发消息回调
+      this.callbacks.onMessage?.({
+        type: 'event',
+        event: eventType,
+        payload: parsed,
+        id: generateId(),
+      });
+
+    } catch (error) {
+      console.error('Failed to handle SSE event:', error);
+    }
+  }
+
+  /**
+   * 发送消息（HTTP POST）
+   */
+  async send(data: unknown): Promise<boolean> {
+    if (this.status !== 'connected' || !this.sessionId) {
+      return false;
+    }
+
+    try {
+      const messageUrl = `${this.baseUrl}/api/office-website/message`;
+      
+      // 构建请求体
+      const body: Record<string, unknown> = {
+        sessionId: this.sessionId,
+        content: typeof data === 'string' ? data : JSON.stringify(data),
+      };
+
+      // 如果是请求帧，提取参数
+      if (typeof data === 'object' && data !== null) {
+        const frame = data as Record<string, unknown>;
+        if (frame['type'] === 'req' && frame['method']) {
+          body.method = frame['method'];
+          body.params = frame['params'];
+          body.id = frame['id'];
+        }
+      }
+
+      const response = await fetch(messageUrl, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(this.config.token ? { 'Authorization': `Bearer ${this.config.token}` } : {}),
+        },
+        body: JSON.stringify(body),
+      });
+
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+      }
+
+      // 处理响应
+      const result = await response.json();
+      
+      // 触发响应回调
+      if (result) {
+        this.callbacks.onMessage?.({
+          type: 'res',
+          id: body.id as string,
+          ok: true,
+          payload: result,
+        });
+      }
+
+      return true;
+    } catch (error) {
+      console.error('Failed to send message:', error);
+      return false;
+    }
+  }
+
+  /**
+   * 同步消息发送（兼容旧接口）
+   */
+  sendSync(data: unknown): boolean {
+    // 异步发送，但立即返回 true
+    void this.send(data);
+    return true;
+  }
+
   private setupConnectTimeout(): void {
     this.connectTimer = setTimeout(() => {
       if (this.status === 'connecting') {
@@ -163,9 +326,6 @@ export class WebSocketConnection {
     }, this.config.connectTimeout);
   }
 
-  /**
-   * 清除连接超时
-   */
   private clearConnectTimeout(): void {
     if (this.connectTimer) {
       clearTimeout(this.connectTimer);
@@ -173,73 +333,31 @@ export class WebSocketConnection {
     }
   }
 
-  /**
-   * 处理接收到的消息
-   */
-  private handleMessage(data: string): void {
-    try {
-      // 尝试解析 JSON
-      const parsed = JSON.parse(data);
-
-      // 处理心跳响应
-      if (parsed.type === 'pong' || parsed.event === 'pong') {
-        this.lastHeartbeatResponse = Date.now();
-        return;
-      }
-
-      // 处理 tick 事件（Gateway 心跳）
-      if (parsed.event === 'tick') {
-        this.lastHeartbeatResponse = Date.now();
-        return;
-      }
-
-      // 传递给消息回调
-      this.callbacks.onMessage?.(parsed);
-    } catch {
-      // 非 JSON 消息，直接传递
-      this.callbacks.onMessage?.(data);
-    }
-  }
-
-  /**
-   * 处理错误
-   */
   private handleError(error: Error): void {
     this.setStatus('error');
     this.callbacks.onError?.(error);
   }
 
-  /**
-   * 处理连接关闭
-   */
-  private handleClose(code: number, reason: string): void {
-    this.ws = null;
+  private handleDisconnect(reason: string): void {
     this.stopHeartbeat();
     this.clearConnectTimeout();
 
-    const reasonText = reason || `Connection closed (code: ${code})`;
-
     if (this.isManualClose) {
       this.setStatus('disconnected');
-      this.callbacks.onDisconnect?.(reasonText);
+      this.callbacks.onDisconnect?.(reason);
     } else {
       this.setStatus('error');
-      this.callbacks.onDisconnect?.(reasonText);
+      this.callbacks.onDisconnect?.(reason);
 
-      // 自动重连
       if (this.config.reconnect) {
         this.scheduleReconnect();
       }
     }
   }
 
-  /**
-   * 计划重连（指数退避）
-   */
   private scheduleReconnect(): void {
     if (this.reconnectTimer) return;
 
-    // 指数退避：baseInterval * 2^attempts，最大不超过 maxReconnectInterval
     const delay = Math.min(
       this.config.reconnectInterval! * Math.pow(2, this.reconnectAttempts),
       this.config.maxReconnectInterval!
@@ -253,49 +371,52 @@ export class WebSocketConnection {
     }, delay);
   }
 
-  /**
-   * 开始心跳
-   */
   private startHeartbeat(): void {
     this.stopHeartbeat();
     this.lastHeartbeatResponse = Date.now();
 
     this.heartbeatTimer = setInterval(() => {
-      if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+      if (this.status !== 'connected') {
         this.stopHeartbeat();
         return;
       }
 
-      // 检查上次心跳响应是否超时
       const now = Date.now();
       const timeout = this.config.heartbeatInterval! * 2;
+      
+      // 检查心跳超时
       if (now - this.lastHeartbeatResponse > timeout) {
-        // 心跳超时，关闭连接并重连
-        this.ws.close(4000, 'Heartbeat timeout');
+        this.abortController?.abort();
+        this.handleDisconnect('Heartbeat timeout');
         return;
       }
 
-      // 发送心跳
+      // 发送心跳（通过发送一个轻量级请求）
       this.sendHeartbeat();
     }, this.config.heartbeatInterval);
   }
 
-  /**
-   * 发送心跳包
-   */
-  private sendHeartbeat(): void {
-    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
+  private async sendHeartbeat(): Promise<void> {
+    if (this.status !== 'connected' || !this.sessionId) {
+      return;
+    }
 
     try {
-      this.ws.send(JSON.stringify({ type: 'ping', timestamp: Date.now() }));
+      const pingUrl = `${this.baseUrl}/api/office-website/ping?sessionId=${encodeURIComponent(this.sessionId)}`;
+      
+      await fetch(pingUrl, {
+        method: 'GET',
+        headers: {
+          ...(this.config.token ? { 'Authorization': `Bearer ${this.config.token}` } : {}),
+        },
+      });
+      
+      this.lastHeartbeatResponse = Date.now();
     } catch {
-      // 发送失败，忽略错误
+      // 心跳失败，连接可能已断开
     }
   }
 
-  /**
-   * 停止心跳
-   */
   private stopHeartbeat(): void {
     if (this.heartbeatTimer) {
       clearInterval(this.heartbeatTimer);
@@ -303,9 +424,6 @@ export class WebSocketConnection {
     }
   }
 
-  /**
-   * 清除所有定时器
-   */
   private clearTimers(): void {
     this.clearConnectTimeout();
     this.stopHeartbeat();
@@ -315,80 +433,69 @@ export class WebSocketConnection {
     }
   }
 
-  /**
-   * 断开连接
-   */
   disconnect(): void {
     this.isManualClose = true;
     this.clearTimers();
     this.reconnectAttempts = 0;
 
-    if (this.ws) {
-      const readyState = this.ws.readyState;
-      if (readyState === WebSocket.OPEN || readyState === WebSocket.CONNECTING) {
-        this.ws.close(1000, 'Manual disconnect');
-      }
-      this.ws = null;
+    // 取消 SSE 连接
+    if (this.abortController) {
+      this.abortController.abort();
+      this.abortController = null;
     }
 
     this.setStatus('disconnected');
   }
 
-  /**
-   * 重新连接
-   */
   reconnect(): void {
     this.disconnect();
     this.isManualClose = false;
     this.connect();
   }
 
-  /**
-   * 发送消息
-   */
-  send(data: unknown): boolean {
-    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
-      return false;
-    }
-
-    try {
-      const message = typeof data === 'string' ? data : JSON.stringify(data);
-      this.ws.send(message);
-      return true;
-    } catch {
-      return false;
-    }
-  }
-
-  /**
-   * 检查是否已连接
-   */
   isConnected(): boolean {
-    return this.ws !== null && this.ws.readyState === WebSocket.OPEN;
+    return this.status === 'connected';
   }
 
-  /**
-   * 更新配置
-   */
   updateConfig(newConfig: Partial<ConnectionConfig>): void {
     this.config = { ...this.config, ...newConfig };
+    if (newConfig.url) {
+      this.parseBaseUrl();
+    }
   }
 
-  /**
-   * 销毁连接管理器
-   */
   destroy(): void {
     this.disconnect();
     this.callbacks = {};
   }
+
+  /**
+   * 获取当前会话 ID
+   */
+  getSessionId(): string | null {
+    return this.sessionId;
+  }
 }
 
+// 兼容性别名
+export const WebSocketConnection = HttpConnection;
+
 /**
- * 创建 WebSocket 连接实例
+ * 创建连接实例
  */
 export function createWebSocketConnection(
   config: ConnectionConfig,
   callbacks?: ConnectionCallbacks
-): WebSocketConnection {
-  return new WebSocketConnection(config, callbacks);
+): HttpConnection {
+  return new HttpConnection(config, callbacks);
+}
+
+/**
+ * 创建 HTTP 连接实例
+ */
+export function createHttpConnection(
+  config: ConnectionConfig,
+  callbacks?: ConnectionCallbacks
+): HttpConnection {
+  return new HttpConnection(config, callbacks);
 }

@@ -7,7 +7,7 @@
 import { create } from 'zustand';
 import { persist, createJSONStorage } from 'zustand/middleware';
 import type { AgentConnectionStatus, AgentMessage, AgentPermission } from '@/types/agent';
-import { WebSocketConnection, createWebSocketConnection, type ConnectionConfig } from './connection';
+import { HttpConnection, createHttpConnection, type ConnectionConfig } from './connection';
 import { MessageHandler, createMessageHandler, frameToAgentMessage, type ChatFrame } from './message-handler';
 
 // 持久化配置（存储在 localStorage）
@@ -26,6 +26,8 @@ interface RuntimeState {
   error: string | null;
   reconnectAttempts: number;
   lastConnectedAt: number | null;
+  sessionKey: string | null;
+  isSending: boolean;
 }
 
 // 操作方法
@@ -45,7 +47,7 @@ interface Actions {
   togglePermission: (permission: AgentPermission) => void;
 
   // 消息管理
-  sendMessage: (content: string) => boolean;
+  sendMessage: (content: string) => Promise<boolean>;
   addMessage: (message: AgentMessage) => void;
   clearMessages: () => void;
 
@@ -81,10 +83,12 @@ const defaultRuntimeState: RuntimeState = {
   error: null,
   reconnectAttempts: 0,
   lastConnectedAt: null,
+  sessionKey: null,
+  isSending: false,
 };
 
 // 连接实例（不存储在 store 中）
-let connection: WebSocketConnection | null = null;
+let connection: HttpConnection | null = null;
 let messageHandler: MessageHandler | null = null;
 
 /**
@@ -120,15 +124,20 @@ export const useWebSocketStore = create<WebSocketStore>()(
 
         // 创建消息处理器
         messageHandler = createMessageHandler(
-          (data) => connection?.send(data) ?? false,
+          async (data) => await connection?.send(data) ?? false,
           { requestTimeout: 30000, maxQueueSize: 100 }
         );
 
         // 订阅聊天消息
         messageHandler.on('chat', (payload) => {
-          const frame = payload as ChatFrame;
-          const message = frameToAgentMessage(frame);
-          get().addMessage(message);
+          const frame = payload as any;
+          // 只在 final 或 delta 状态时添加消息
+          if (frame.state === 'final' || frame.state === 'delta') {
+            const message = frameToAgentMessage(frame);
+            if (message.role === 'agent') {
+              get().addMessage(message);
+            }
+          }
         });
 
         // 订阅 agent 事件
@@ -148,12 +157,21 @@ export const useWebSocketStore = create<WebSocketStore>()(
           connectTimeout: 10000,
         };
 
-        connection = createWebSocketConnection(config, {
+        connection = createHttpConnection(config, {
           onStatusChange: (status) => {
             get()._setStatus(status);
             if (status === 'connected') {
               get()._setLastConnectedAt(Date.now());
               get()._setReconnectAttempts(0);
+            }
+          },
+          onConnect: (helloPayload) => {
+            get()._setError(null);
+            // 从 hello 消息的 snapshot.sessionDefaults 获取 mainSessionKey
+            const payload = helloPayload as any;
+            const mainSessionKey = payload?.snapshot?.sessionDefaults?.mainSessionKey;
+            if (mainSessionKey) {
+              set({ sessionKey: mainSessionKey });
             }
           },
           onMessage: (data) => {
@@ -162,11 +180,9 @@ export const useWebSocketStore = create<WebSocketStore>()(
           onError: (error) => {
             get()._setError(error.message);
           },
-          onConnect: () => {
-            get()._setError(null);
-          },
           onDisconnect: (reason) => {
             console.log('Disconnected:', reason);
+            set({ sessionKey: null });
           },
         });
 
@@ -226,8 +242,9 @@ export const useWebSocketStore = create<WebSocketStore>()(
       },
 
       // 消息管理
-      sendMessage: (content) => {
-        if (!messageHandler) {
+      sendMessage: async (content) => {
+        const state = get();
+        if (!messageHandler || !state.sessionKey) {
           return false;
         }
 
@@ -238,10 +255,20 @@ export const useWebSocketStore = create<WebSocketStore>()(
           content,
           timestamp: Date.now(),
         };
-        get().addMessage(userMessage);
+        state.addMessage(userMessage);
+        set({ isSending: true });
 
-        // 发送消息
-        return messageHandler.sendChat(content, 'user');
+        try {
+          // 发送消息
+          await messageHandler.sendChat(content, state.sessionKey);
+          return true;
+        } catch (err) {
+          console.error('Failed to send message:', err);
+          set({ error: err instanceof Error ? err.message : 'Failed to send message' });
+          return false;
+        } finally {
+          set({ isSending: false });
+        }
       },
 
       addMessage: (message) => {
@@ -277,7 +304,7 @@ export const useWebSocketStore = create<WebSocketStore>()(
 /**
  * 获取当前连接实例（用于高级操作）
  */
-export function getConnection(): WebSocketConnection | null {
+export function getConnection(): HttpConnection | null {
   return connection;
 }
 
@@ -322,3 +349,5 @@ export const selectGatewayUrl = (state: WebSocketStore) => state.gatewayUrl;
 export const selectError = (state: WebSocketStore) => state.error;
 export const selectIsConnected = (state: WebSocketStore) => state.status === 'connected';
 export const selectIsConnecting = (state: WebSocketStore) => state.status === 'connecting';
+export const selectIsSending = (state: WebSocketStore) => state.isSending;
+export const selectSessionKey = (state: WebSocketStore) => state.sessionKey;

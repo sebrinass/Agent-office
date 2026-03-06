@@ -6,7 +6,7 @@ import { cn } from "@/lib/utils";
 
 interface MessageInputProps {
   // 发送消息回调
-  onSend: (content: string) => void;
+  onSend: (content: string) => Promise<boolean> | void;
   // 是否禁用输入
   disabled?: boolean;
   // 是否正在发送
@@ -50,11 +50,17 @@ export function MessageInput({
   );
 
   // 发送消息
-  const handleSend = useCallback(() => {
+  const handleSend = useCallback(async () => {
     const trimmedValue = inputValue.trim();
     if (!trimmedValue || disabled || isSending) return;
 
-    onSend(trimmedValue);
+    const result = onSend(trimmedValue);
+    if (result instanceof Promise) {
+      try {
+        await result;
+      } catch {
+      }
+    }
     setInputValue("");
   }, [inputValue, disabled, isSending, onSend]);
 
