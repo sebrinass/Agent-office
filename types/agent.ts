@@ -6,6 +6,9 @@
 // Agent 连接状态
 export type AgentConnectionStatus = 'connected' | 'connecting' | 'disconnected' | 'error';
 
+// Gateway 连接模式
+export type ConnectionMode = 'websocket' | 'http-api';
+
 // Agent 权限级别
 export type AgentPermission = 'view' | 'annotate' | 'edit';
 

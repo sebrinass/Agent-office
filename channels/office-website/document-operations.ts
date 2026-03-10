@@ -7,10 +7,10 @@
  * @module channels/office-website/document-operations
  */
 
-import type { OpenClawConfig } from "../../config/config.js";
-import type { DocumentContext } from "./api.js";
-import type { SessionManager } from "./session.js";
-import { checkPermission, checkPermissions } from "./permissions.js";
+import type { OpenClawConfig } from "../../config/config";
+import type { DocumentContext } from "./api";
+import type { SessionManager } from "./session";
+import { checkPermission, checkPermissions } from "./permissions";
 
 /**
  * Document operation types

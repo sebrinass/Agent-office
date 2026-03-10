@@ -17,20 +17,25 @@ interface ChatPanelProps {
   messages: AgentMessage[];
   // 是否正在发送
   isSending?: boolean;
+  // 是否展开
+  isOpen?: boolean;
   // 事件回调
   onSendMessage?: (content: string) => Promise<boolean>;
   onReconnect?: () => void;
+  onToggle?: (isOpen: boolean) => void;
 }
 
 export function ChatPanel({
   connectionStatus,
   messages,
   isSending = false,
+  isOpen: isOpenProp = true,
   onSendMessage,
   onReconnect,
+  onToggle,
 }: ChatPanelProps) {
-  // 侧边栏展开/收起状态
-  const [isOpen, setIsOpen] = useState(true);
+  // 侧边栏展开/收起状态（受控）
+  const isOpen = isOpenProp;
   // 配置面板展开状态
   const [showConfig, setShowConfig] = useState(false);
   // 侧边栏宽度（像素）
@@ -80,8 +85,8 @@ export function ChatPanel({
 
   // 切换侧边栏展开/收起
   const togglePanel = useCallback(() => {
-    setIsOpen(!isOpen);
-  }, [isOpen]);
+    onToggle?.(!isOpen);
+  }, [isOpen, onToggle]);
 
   // 切换配置面板
   const toggleConfig = useCallback(() => {
@@ -92,13 +97,13 @@ export function ChatPanel({
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.key === "Escape" && isOpen) {
-        setIsOpen(false);
+        onToggle?.(false);
         toast.info("会话窗口已关闭");
       }
     };
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [isOpen]);
+  }, [isOpen, onToggle]);
 
   // 连接状态变化时显示 Toast 通知
   useEffect(() => {
@@ -114,38 +119,30 @@ export function ChatPanel({
   }, [connectionStatus]);
 
   return (
-    <>
-      {/* 展开按钮（收起状态下显示） */}
+    <div className="h-full flex flex-col">
+      {/* 展开按钮（收起状态下显示在窄条中） */}
       {!isOpen && (
-        <button
-          onClick={togglePanel}
-          className="fixed right-0 top-1/2 -translate-y-1/2 z-50 bg-primary text-primary-foreground p-2 rounded-l-lg shadow-lg hover:bg-primary/90 transition-colors"
-          aria-label="展开会话窗口"
-        >
-          <MessageSquare className="w-5 h-5" />
-        </button>
+        <div className="h-full w-12 flex items-center justify-center bg-background">
+          <button
+            onClick={togglePanel}
+            className="bg-primary text-primary-foreground p-2 rounded-lg shadow-lg hover:bg-primary/90 transition-colors"
+            aria-label="展开会话窗口"
+          >
+            <MessageSquare className="w-5 h-5" />
+          </button>
+        </div>
       )}
 
       {/* 侧边栏主体 */}
       <aside
         className={cn(
-          "fixed right-0 top-0 h-full bg-background border-l border-border flex flex-col z-40 transition-transform duration-300",
-          isOpen ? "translate-x-0" : "translate-x-full"
+          "h-full bg-background border-l border-border flex flex-col transition-all duration-300 overflow-hidden",
+          isOpen ? "w-full" : "w-0"
         )}
-        style={{ width: `${width}px` }}
         onMouseMove={resize}
         onMouseUp={stopResizing}
         onMouseLeave={stopResizing}
       >
-        {/* 调整宽度手柄 */}
-        <div
-          className={cn(
-            "absolute left-0 top-0 bottom-0 w-1 cursor-ew-resize hover:bg-primary/20 transition-colors",
-            isResizing && "bg-primary/30"
-          )}
-          onMouseDown={startResizing}
-        />
-
         {/* 头部标题栏 */}
         <header className="flex items-center justify-between px-4 h-14 border-b border-border shrink-0">
           <div className="flex items-center gap-2">
@@ -203,6 +200,6 @@ export function ChatPanel({
           />
         </div>
       </aside>
-    </>
+    </div>
   );
 }

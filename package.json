@@ -10,7 +10,10 @@
     "svgr": "npx @svgr/cli --out-dir components/svg --typescript -- public/svg",
     "pages:dev": "npx wrangler pages dev ./out",
     "deploy": "pnpm build && npx wrangler pages deploy ./out --project-name=office-website",
-    "deploy:preview": "pnpm build && npx wrangler pages deploy ./out --project-name=office-website --branch=preview"
+    "deploy:preview": "pnpm build && npx wrangler pages deploy ./out --project-name=office-website --branch=preview",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage"
   },
   "dependencies": {
     "@bprogress/next": "^3.2.12",

@@ -1,124 +1,177 @@
 /**
- * Office-Website Channel Plugin
+ * Office-Website Channel Plugin Entry Point
  *
- * This plugin enables OpenClaw to integrate with the office-website document collaboration platform.
- * It provides HTTP API endpoints for message exchange, document context awareness, and permission control.
+ * This is the main entry point for the office-website channel plugin.
+ * It registers the complete ChannelPlugin with OpenClaw Gateway.
  *
  * @module channels/office-website
  */
 
-import type { OpenClawPluginApi } from "../../plugins/types.js";
-import type { ChannelPlugin } from "../plugins/types.plugin.js";
-import { officeWebsiteConfig } from "./config.js";
-import { monitorOfficeWebsiteChannel } from "./monitor.js";
-import { officeWebsitePermissions } from "./permissions.js";
-import { registerApiRoutes, setSessionManager } from "./api.js";
-import { SessionManager } from "./session.js";
+import type { IncomingMessage, ServerResponse } from "node:http";
+import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
+import type { OpenClawConfig } from "../../config/config";
+import { officeWebsitePlugin } from "./plugin";
+import {
+  handleMessageHttpRequest,
+  handleHistoryHttpRequest,
+  handleSessionHttpRequest,
+  handlePingHttpRequest,
+  handleStreamHttpRequest,
+} from "./api";
+
+// Import runtime functions from runtime.ts (needed for register() function)
+import {
+  getOfficeWebsiteRuntime,
+  setOfficeWebsiteRuntime,
+  // Text APIs
+  chunkMarkdownText,
+  chunkByNewline,
+  chunkTextWithMode,
+  hasControlCommand,
+  convertMarkdownTables,
+  // Reply APIs
+  dispatchReplyFromConfig,
+  finalizeInboundContext,
+  createReplyDispatcherWithTyping,
+  withReplyDispatcher,
+  resolveEffectiveMessagesConfig,
+  resolveHumanDelayConfig,
+  // Routing APIs
+  resolveAgentRoute,
+  // Media APIs
+  fetchRemoteMedia,
+  saveMediaBuffer,
+  // Session APIs
+  resolveStorePath,
+  updateLastRoute,
+  // Activity APIs
+  recordChannelActivity,
+  getChannelActivity,
+  // Mentions APIs
+  buildMentionRegexes,
+  matchesMentionPatterns,
+  // Debounce APIs
+  createInboundDebouncer,
+  resolveInboundDebounceMs,
+} from "./runtime";
+
+// Re-export runtime functions for external consumers
+export {
+  getOfficeWebsiteRuntime,
+  setOfficeWebsiteRuntime,
+  // Text APIs
+  chunkMarkdownText,
+  chunkByNewline,
+  chunkTextWithMode,
+  hasControlCommand,
+  convertMarkdownTables,
+  // Reply APIs
+  dispatchReplyFromConfig,
+  finalizeInboundContext,
+  createReplyDispatcherWithTyping,
+  withReplyDispatcher,
+  resolveEffectiveMessagesConfig,
+  resolveHumanDelayConfig,
+  // Routing APIs
+  resolveAgentRoute,
+  // Media APIs
+  fetchRemoteMedia,
+  saveMediaBuffer,
+  // Session APIs
+  resolveStorePath,
+  updateLastRoute,
+  // Activity APIs
+  recordChannelActivity,
+  getChannelActivity,
+  // Mentions APIs
+  buildMentionRegexes,
+  matchesMentionPatterns,
+  // Debounce APIs
+  createInboundDebouncer,
+  resolveInboundDebounceMs,
+};
 
 /**
- * Channel metadata for office-website
+ * Office-Website Plugin Definition
+ *
+ * This is the main plugin object that OpenClaw Gateway loads.
+ * It uses `api.registerChannel()` to register the complete ChannelPlugin.
  */
-const officeWebsiteMeta = {
+const plugin = {
   id: "office-website",
-  label: "Office Website",
-  selectionLabel: "Office Website (Document Collaboration)",
-  docsPath: "/docs/channels/office-website",
-  blurb: "Document collaboration platform with AI-powered assistance",
-  order: 100,
+  name: "Office Website",
+  description: "Office document collaboration channel for AI-powered assistance",
+  version: "1.0.0",
+  kind: "channel",
+
+  /**
+   * Plugin registration function
+   * Called by OpenClaw Gateway when the plugin is loaded
+   */
+  register(api: OpenClawPluginApi) {
+    // Save runtime reference for later use
+    setOfficeWebsiteRuntime(api.runtime);
+
+    // Log registration
+    console.log(`[office-website] Registering plugin: ${api.id} (${api.name})`);
+
+    // Register the complete channel plugin
+    api.registerChannel({ plugin: officeWebsitePlugin });
+
+    // Register HTTP routes for frontend API
+    // These routes enable the office-website frontend to communicate with OpenClaw
+    const cfg = api.config as OpenClawConfig;
+
+    // GET /api/office-website/ping - Heartbeat endpoint
+    // auth: "plugin" means plugin handles auth itself (no gateway enforcement)
+    api.registerHttpRoute({
+      path: "/api/office-website/ping",
+      auth: "plugin",
+      handler: async (req: IncomingMessage, res: ServerResponse) => {
+        return handlePingHttpRequest(req, res, cfg);
+      },
+    });
+
+    // GET /api/office-website/session - Get session status
+    api.registerHttpRoute({
+      path: "/api/office-website/session",
+      auth: "plugin",
+      handler: async (req: IncomingMessage, res: ServerResponse) => {
+        return handleSessionHttpRequest(req, res, cfg);
+      },
+    });
+
+    // GET /api/office-website/history - Get message history
+    api.registerHttpRoute({
+      path: "/api/office-website/history",
+      auth: "plugin",
+      handler: async (req: IncomingMessage, res: ServerResponse) => {
+        return handleHistoryHttpRequest(req, res, cfg);
+      },
+    });
+
+    // POST /api/office-website/message - Send a message
+    api.registerHttpRoute({
+      path: "/api/office-website/message",
+      auth: "plugin",
+      handler: async (req: IncomingMessage, res: ServerResponse) => {
+        return handleMessageHttpRequest(req, res, cfg);
+      },
+    });
+
+    // GET /api/office-website/stream - SSE streaming endpoint
+    api.registerHttpRoute({
+      path: "/api/office-website/stream",
+      auth: "plugin",
+      handler: async (req: IncomingMessage, res: ServerResponse) => {
+        return handleStreamHttpRequest(req, res, cfg);
+      },
+    });
+
+    console.log("[office-website] HTTP routes registered successfully");
+    console.log("[office-website] Channel plugin registered successfully");
+  },
 };
 
-/**
- * Channel capabilities
- */
-const officeWebsiteCapabilities: import("../plugins/types.core.js").ChannelCapabilities = {
-  chatTypes: ["direct", "group"],
-  polls: false,
-  reactions: false,
-  edit: true,
-  unsend: false,
-  reply: true,
-  effects: false,
-  groupManagement: false,
-  threads: false,
-  media: true,
-  nativeCommands: false,
-  blockStreaming: false,
-};
-
-/**
- * Register the office-website channel plugin
- *
- * This function returns the complete channel plugin configuration
- * that OpenClaw uses to integrate with the office-website platform.
- */
-export function registerOfficeWebsiteChannel(): ChannelPlugin {
-  return {
-    id: "office-website",
-    meta: officeWebsiteMeta,
-    capabilities: officeWebsiteCapabilities,
-    config: officeWebsiteConfig,
-    // Gateway monitoring function for receiving messages
-    gateway: {
-      startAccount: monitorOfficeWebsiteChannel,
-    },
-    // HTTP API endpoints - these are declared for method listing
-    gatewayMethods: [
-      "POST /api/office-website/message",
-      "GET /api/office-website/stream",
-      "POST /api/office-website/document",
-      "GET /api/office-website/history",
-      "GET /api/office-website/session",
-      "GET /api/office-website/ping",
-    ],
-  };
-}
-
-/**
- * Plugin registration function for OpenClaw plugin system
- *
- * This function is called by the OpenClaw plugin loader to register
- * the office-website channel plugin with all its HTTP routes.
- */
-export function register(api: OpenClawPluginApi): void {
-  // Register the channel
-  api.registerChannel(registerOfficeWebsiteChannel());
-
-  // Create session manager
-  const sessionManager = new SessionManager({
-    maxSessions: 100,
-    sessionTimeout: 30 * 60 * 1000, // 30 minutes
-    memoryEnabled: true,
-    memoryProvider: "openai",
-    embeddingModel: "text-embedding-3-small",
-  });
-
-  // Set global session manager for API handlers
-  setSessionManager(sessionManager);
-
-  // Register HTTP routes using the plugin API
-  registerApiRoutes({
-    cfg: api.config,
-    sessionManager,
-    registerHttpRoute: (params) => {
-      api.registerHttpRoute({
-        path: params.path,
-        auth: params.auth,
-        handler: params.handler,
-      });
-    },
-  });
-}
-
-// Re-export submodules for external use
-export { officeWebsiteConfig } from "./config.js";
-export { monitorOfficeWebsiteChannel } from "./monitor.js";
-export { officeWebsiteApi, registerApiRoutes } from "./api.js";
-export { sendMessage, sendRichTextMessage, sendMediaMessage, sendStreamStart, sendStreamDelta, sendStreamEnd, blocksToMarkdown, markdownToBlocks } from "./send.js";
-export { SessionManager } from "./session.js";
-export { authenticateRequest } from "./auth.js";
-export { officeWebsitePermissions, checkPermission } from "./permissions.js";
-export { MemoryIntegration, createMemoryIntegration } from "./memory-integration.js";
-export { DocumentContextManager, createDocumentContextManager, documentOperation, DocumentOperationBuilder } from "./document-operations.js";
-
-// Default export
-export default registerOfficeWebsiteChannel;
+export default plugin;
+export { plugin, officeWebsitePlugin };

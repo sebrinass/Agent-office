@@ -1,0 +1,28 @@
+{
+  "id": "office-website",
+  "channels": ["office-website"],
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "accounts": {
+        "type": "object",
+        "additionalProperties": {
+          "type": "object",
+          "properties": {
+            "enabled": { "type": "boolean", "default": true },
+            "token": { "type": "string" },
+            "tokenFile": { "type": "string" },
+            "apiUrl": { "type": "string", "format": "uri" },
+            "webhookUrl": { "type": "string", "format": "uri" },
+            "sessionTimeout": { "type": "number", "default": 3600000 },
+            "maxSessions": { "type": "number", "default": 100 },
+            "memoryEnabled": { "type": "boolean", "default": true },
+            "memoryProvider": { "type": "string", "enum": ["openai", "local"], "default": "openai" },
+            "embeddingModel": { "type": "string", "default": "text-embedding-3-small" }
+          }
+        }
+      }
+    }
+  }
+}

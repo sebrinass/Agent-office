@@ -1,6 +1,6 @@
 "use client";
 
-import { use, useLayoutEffect, useRef, useEffect } from "react";
+import { use, useLayoutEffect, useRef, useEffect, useState } from "react";
 import { useAppStore, useResolvedLanguage } from "@/store";
 import { getDocumentType } from "@/utils/editor/utils";
 import io, { MockSocket } from "@/utils/editor/socket";
@@ -9,7 +9,7 @@ import { createXHRProxy } from "@/utils/editor/xhr";
 import { DocEditor } from "@/utils/editor/types";
 import { ChatPanel } from "@/components/chat/chat-panel";
 import { PermissionControls } from "@/components/permission/permission-controls";
-import { useWebSocketStore } from "@/lib/websocket/store";
+import { initializeConnection, useWebSocketStore } from "@/lib/websocket/store";
 
 const APP_ROOT = process.env.NEXT_PUBLIC_APP_ROOT || "/v9.3.0.24-1";
 
@@ -25,8 +25,13 @@ export default function Page({ params }: { params: Promise<{}> }) {
   const reconnect = useWebSocketStore((state) => state.reconnect);
   const sendMessage = useWebSocketStore((state) => state.sendMessage);
   const isSending = useWebSocketStore((state) => state.isSending);
+  
+  // 聊天框展开状态（用于控制布局）
+  const [isChatOpen, setIsChatOpen] = useState(true);
 
   useEffect(() => {
+    initializeConnection();
+
     const handleBeforeUnload = (e: BeforeUnloadEvent) => {
       if (isDirty.current) {
         e.preventDefault();
@@ -45,8 +50,20 @@ export default function Page({ params }: { params: Promise<{}> }) {
 
     const fileId = searchParams.get("fileId");
     const newDoc = searchParams.get("new");
+    const docId = searchParams.get("doc"); // IndexedDB 存储的文档ID
 
-    if (!fileId && newDoc) {
+    // 优先从 IndexedDB 恢复文档
+    if (docId) {
+      server.openFromStorage(docId).then((result) => {
+        console.log("[Editor] 从本地存储恢复文档:", result);
+      }).catch((err) => {
+        console.error("[Editor] 恢复文档失败:", err);
+        // 恢复失败时创建新文档
+        if (!fileId && newDoc) {
+          server.openNew(newDoc);
+        }
+      });
+    } else if (!fileId && newDoc) {
       server.openNew(newDoc);
     }
 
@@ -240,7 +257,10 @@ export default function Page({ params }: { params: Promise<{}> }) {
   return (
     <div className="flex w-screen h-screen">
       {/* 左侧文档编辑区 */}
-      <div className="flex-1 h-full flex flex-col">
+      <div 
+        className="h-full flex flex-col transition-all duration-300"
+        style={{ width: isChatOpen ? 'calc(100% - 400px)' : '100%' }}
+      >
         {/* 权限控制栏 */}
         <div className="flex items-center justify-between px-4 h-12 bg-background border-b border-border shrink-0">
           <div className="flex items-center gap-2">
@@ -261,13 +281,20 @@ export default function Page({ params }: { params: Promise<{}> }) {
       </div>
 
       {/* 右侧会话窗口 */}
-      <ChatPanel
-        connectionStatus={connectionStatus}
-        messages={messages}
-        isSending={isSending}
-        onSendMessage={sendMessage}
-        onReconnect={reconnect}
-      />
+      <div 
+        className="h-full transition-all duration-300 border-l border-border overflow-hidden"
+        style={{ width: isChatOpen ? '400px' : '48px' }}
+      >
+        <ChatPanel
+          connectionStatus={connectionStatus}
+          messages={messages}
+          isSending={isSending}
+          isOpen={isChatOpen}
+          onSendMessage={sendMessage}
+          onReconnect={reconnect}
+          onToggle={setIsChatOpen}
+        />
+      </div>
     </div>
   );
 }

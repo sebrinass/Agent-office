@@ -7,20 +7,28 @@
  * @module channels/office-website/auth
  */
 
-import type { OpenClawConfig } from "../../config/config.js";
+import type { OpenClawConfig } from "../../config/config";
+import { maskSensitive } from "./utils";
 
-/**
- * Authentication result
- */
+function timingSafeEqual(a: string, b: string): boolean {
+  if (a.length !== b.length) {
+    return false;
+  }
+
+  let result = 0;
+  for (let i = 0; i < a.length; i++) {
+    result |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  }
+
+  return result === 0;
+}
+
 export interface AuthResult {
   valid: boolean;
   accountId?: string;
   error?: string;
 }
 
-/**
- * Token validation result
- */
 export interface TokenValidation {
   valid: boolean;
   expired?: boolean;
@@ -28,30 +36,19 @@ export interface TokenValidation {
   scopes?: string[];
 }
 
-/**
- * Authenticate a request
- *
- * Validates the authentication token or API key from the request headers.
- *
- * @param cfg - OpenClaw configuration
- * @param authHeader - Authorization header value
- */
 export async function authenticateRequest(
   cfg: OpenClawConfig,
   authHeader?: string,
 ): Promise<AuthResult> {
-  // Check if auth header exists
   if (!authHeader) {
     return { valid: false, error: "Missing authorization header" };
   }
 
-  // Parse auth header
   const [type, token] = authHeader.split(" ");
   if (!type || !token) {
     return { valid: false, error: "Invalid authorization header format" };
   }
 
-  // Handle different auth types
   switch (type.toLowerCase()) {
     case "bearer":
       return validateBearerToken(cfg, token);
@@ -62,88 +59,78 @@ export async function authenticateRequest(
   }
 }
 
-/**
- * Validate a Bearer token
- */
 async function validateBearerToken(
   cfg: OpenClawConfig,
   token: string,
 ): Promise<AuthResult> {
-  // Get configured tokens
   const accounts = cfg.channels?.["office-website"]?.accounts as
     | Record<string, { token?: string; tokenFile?: string }>
     | undefined;
+  const gatewayToken = cfg.gateway?.auth?.mode === "token" ? cfg.gateway.auth.token : undefined;
 
-  if (!accounts) {
+  if (!accounts && !gatewayToken) {
     return { valid: false, error: "No accounts configured" };
   }
 
-  // Check each account for matching token
-  for (const [accountId, account] of Object.entries(accounts)) {
-    // Check direct token
-    if (account.token && account.token === token) {
+  for (const [accountId, account] of Object.entries(accounts ?? {})) {
+    if (account.token && timingSafeEqual(account.token, token)) {
       return { valid: true, accountId };
     }
 
-    // Check token file
     if (account.tokenFile) {
       try {
         const fileToken = await readTokenFile(account.tokenFile);
-        if (fileToken === token) {
+        if (timingSafeEqual(fileToken, token)) {
           return { valid: true, accountId };
         }
       } catch (error) {
-        console.error(`Failed to read token file for account ${accountId}:`, error);
+        const errorMessage = error instanceof Error ? error.message : String(error);
+        console.error(
+          `Failed to read token file for account ${accountId}: ${maskSensitive(errorMessage)}`,
+        );
       }
     }
+  }
+
+  if (gatewayToken && timingSafeEqual(gatewayToken, token)) {
+    return { valid: true, accountId: "default" };
   }
 
   return { valid: false, error: "Invalid token" };
 }
 
-/**
- * Validate an API key
- */
 async function validateApiKey(
   cfg: OpenClawConfig,
   apiKey: string,
 ): Promise<AuthResult> {
-  // API keys are stored in the same way as tokens
-  // but are validated differently (e.g., may have different scopes)
   const accounts = cfg.channels?.["office-website"]?.accounts as
     | Record<string, { token?: string; tokenFile?: string }>
     | undefined;
+  const gatewayToken = cfg.gateway?.auth?.mode === "token" ? cfg.gateway.auth.token : undefined;
 
-  if (!accounts) {
+  if (!accounts && !gatewayToken) {
     return { valid: false, error: "No accounts configured" };
   }
 
-  // Check each account for matching API key
-  for (const [accountId, account] of Object.entries(accounts)) {
-    if (account.token && account.token === apiKey) {
+  for (const [accountId, account] of Object.entries(accounts ?? {})) {
+    if (account.token && timingSafeEqual(account.token, apiKey)) {
       return { valid: true, accountId };
     }
+  }
+
+  if (gatewayToken && timingSafeEqual(gatewayToken, apiKey)) {
+    return { valid: true, accountId: "default" };
   }
 
   return { valid: false, error: "Invalid API key" };
 }
 
-/**
- * Read token from file
- */
 async function readTokenFile(filePath: string): Promise<string> {
-  // In a real implementation, this would read from the file system
-  // For now, we'll use a simple approach
   const fs = await import("fs/promises");
   const token = await fs.readFile(filePath, "utf-8");
   return token.trim();
 }
 
-/**
- * Create authentication middleware
- *
- * Returns a middleware function that can be used with HTTP servers.
- */
 export function createAuthMiddleware(cfg: OpenClawConfig) {
   return async (req: { headers: Record<string, string | undefined> }, next: () => void) => {
     const authHeader = req.headers["authorization"];
@@ -153,19 +140,12 @@ export function createAuthMiddleware(cfg: OpenClawConfig) {
       throw new Error(`Authentication failed: ${result.error}`);
     }
 
-    // Attach account ID to request for later use
     (req as Record<string, unknown>).accountId = result.accountId;
 
     return next();
   };
 }
 
-/**
- * Generate a new token for testing
- *
- * This is a utility function for generating test tokens.
- * In production, tokens should be generated securely.
- */
 export function generateTestToken(): string {
   const randomBytes = new Uint8Array(32);
   crypto.getRandomValues(randomBytes);

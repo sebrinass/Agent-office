@@ -7,8 +7,8 @@
  * @module channels/office-website/session
  */
 
-import type { DocumentContext } from "./api.js";
-import type { MemoryIntegration, MemoryEntry } from "./memory-integration.js";
+import type { DocumentContext } from "./api";
+import type { MemoryIntegration, MemoryEntry } from "./memory-integration";
 
 /**
  * Session state
@@ -45,7 +45,7 @@ export interface SessionMessage {
 }
 
 /**
- * Session manager configuration
+ * Session Manager configuration
  */
 export interface SessionManagerConfig {
   maxSessions: number;
@@ -53,6 +53,78 @@ export interface SessionManagerConfig {
   memoryEnabled: boolean;
   memoryProvider: string;
   embeddingModel: string;
+  persistenceEnabled?: boolean;
+  persistencePath?: string;
+  autoSaveInterval?: number;
+}
+
+/**
+ * Persistence storage interface
+ */
+export interface SessionPersistenceStorage {
+  save(sessions: Map<string, SessionState>, messages: Map<string, SessionMessage[]>): Promise<void>;
+  load(): Promise<{ sessions: Map<string, SessionState>; messages: Map<string, SessionMessage[]> }>;
+  clear(): Promise<void>;
+}
+
+/**
+ * File-based persistence storage
+ */
+export class FilePersistenceStorage implements SessionPersistenceStorage {
+  private filePath: string;
+
+  constructor(filePath: string) {
+    this.filePath = filePath;
+  }
+
+  async save(
+    sessions: Map<string, SessionState>,
+    messages: Map<string, SessionMessage[]>,
+  ): Promise<void> {
+    const data = {
+      sessions: Array.from(sessions.entries()),
+      messages: Array.from(messages.entries()),
+      savedAt: Date.now(),
+    };
+
+    try {
+      const fs = await import("node:fs/promises");
+      await fs.mkdir(this.filePath.substring(0, this.filePath.lastIndexOf("/")), { recursive: true });
+      await fs.writeFile(this.filePath, JSON.stringify(data), "utf-8");
+    } catch (error) {
+      console.error("Failed to save sessions to file:", error);
+    }
+  }
+
+  async load(): Promise<{
+    sessions: Map<string, SessionState>;
+    messages: Map<string, SessionMessage[]>;
+  }> {
+    try {
+      const fs = await import("node:fs/promises");
+      const data = await fs.readFile(this.filePath, "utf-8");
+      const parsed = JSON.parse(data);
+
+      return {
+        sessions: new Map(parsed.sessions || []),
+        messages: new Map(parsed.messages || []),
+      };
+    } catch {
+      return {
+        sessions: new Map(),
+        messages: new Map(),
+      };
+    }
+  }
+
+  async clear(): Promise<void> {
+    try {
+      const fs = await import("node:fs/promises");
+      await fs.unlink(this.filePath);
+    } catch {
+      // File doesn't exist, ignore
+    }
+  }
 }
 
 /**
@@ -84,11 +156,33 @@ export class SessionManager {
   private messages: Map<string, SessionMessage[]> = new Map();
   private config: SessionManagerConfig;
   private cleanupInterval?: ReturnType<typeof setInterval>;
+  private autoSaveInterval?: ReturnType<typeof setInterval>;
   private memoryIntegration: MemoryIntegration | null = null;
+  private persistenceStorage: SessionPersistenceStorage | null = null;
+  private isDirty = false;
 
   constructor(config: SessionManagerConfig) {
     this.config = config;
     this.startCleanupTimer();
+
+    // Initialize persistence if enabled
+    if (config.persistenceEnabled && config.persistencePath) {
+      this.persistenceStorage = new FilePersistenceStorage(config.persistencePath);
+      this.loadFromPersistence().catch((error) => {
+        console.error("Failed to load sessions from persistence:", error);
+      });
+
+      // Start auto-save timer
+      if (config.autoSaveInterval && config.autoSaveInterval > 0) {
+        this.autoSaveInterval = setInterval(() => {
+          if (this.isDirty) {
+            this.saveToPersistence().catch((error) => {
+              console.error("Failed to auto-save sessions:", error);
+            });
+          }
+        }, config.autoSaveInterval);
+      }
+    }
   }
 
   /**
@@ -103,6 +197,49 @@ export class SessionManager {
    */
   getMemoryIntegration(): MemoryIntegration | null {
     return this.memoryIntegration;
+  }
+
+  /**
+   * Set persistence storage
+   */
+  setPersistenceStorage(storage: SessionPersistenceStorage): void {
+    this.persistenceStorage = storage;
+  }
+
+  /**
+   * Load sessions from persistence storage
+   */
+  private async loadFromPersistence(): Promise<void> {
+    if (!this.persistenceStorage) return;
+
+    try {
+      const { sessions, messages } = await this.persistenceStorage.load();
+      this.sessions = sessions;
+      this.messages = messages;
+    } catch (error) {
+      console.error("Failed to load from persistence:", error);
+    }
+  }
+
+  /**
+   * Save sessions to persistence storage
+   */
+  async saveToPersistence(): Promise<void> {
+    if (!this.persistenceStorage) return;
+
+    try {
+      await this.persistenceStorage.save(this.sessions, this.messages);
+      this.isDirty = false;
+    } catch (error) {
+      console.error("Failed to save to persistence:", error);
+    }
+  }
+
+  /**
+   * Mark data as dirty for auto-save
+   */
+  private markDirty(): void {
+    this.isDirty = true;
   }
 
   // ===========================================================================
@@ -140,6 +277,7 @@ export class SessionManager {
 
     this.sessions.set(id, session);
     this.messages.set(id, []);
+    this.markDirty();
 
     return session;
   }
@@ -181,6 +319,7 @@ export class SessionManager {
     };
 
     this.sessions.set(sessionId, updated);
+    this.markDirty();
     return updated;
   }
 
@@ -195,6 +334,7 @@ export class SessionManager {
 
     this.sessions.delete(sessionId);
     this.messages.delete(sessionId);
+    this.markDirty();
 
     return true;
   }
@@ -205,8 +345,18 @@ export class SessionManager {
   destroyAll(): void {
     this.sessions.clear();
     this.messages.clear();
+    this.markDirty();
     if (this.cleanupInterval) {
       clearInterval(this.cleanupInterval);
+    }
+    if (this.autoSaveInterval) {
+      clearInterval(this.autoSaveInterval);
+    }
+    // Final save before destroying
+    if (this.persistenceStorage) {
+      this.saveToPersistence().catch((error) => {
+        console.error("Failed to save sessions on destroy:", error);
+      });
     }
   }
 
@@ -236,6 +386,7 @@ export class SessionManager {
     const messages = this.messages.get(sessionId) || [];
     messages.push(fullMessage);
     this.messages.set(sessionId, messages);
+    this.markDirty();
 
     // Update session message count
     this.updateSession(sessionId, { messageCount: messages.length });
@@ -362,6 +513,7 @@ export class SessionManager {
 
     messages.splice(index, 1);
     this.messages.set(sessionId, messages);
+    this.markDirty();
     this.updateSession(sessionId, { messageCount: messages.length });
 
     return true;
@@ -377,6 +529,7 @@ export class SessionManager {
     }
 
     this.messages.set(sessionId, []);
+    this.markDirty();
     this.updateSession(sessionId, { messageCount: 0 });
 
     return true;

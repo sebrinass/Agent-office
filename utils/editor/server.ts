@@ -3,6 +3,7 @@ import { MockSocket } from "./socket";
 import { User, Participant, AscSaveTypes } from "./types";
 import { emptyDocx, emptyPdf, emptyPptx, emptyXlsx } from "./empty";
 import { getDocumentType, getFileExt } from "./utils";
+import { saveDocument, loadDocument, createFileFromDocument, StoredDocument } from "@/lib/document/document-storage";
 
 function mergeBuffers(buffers: Uint8Array[]) {
   const totalLength = buffers.reduce((acc, buffer) => acc + buffer.length, 0);
@@ -43,6 +44,7 @@ export class EditorServer {
   private title: string = "";
   private fsMap: Map<string, Uint8Array> = new Map();
   private urlsMap: Map<string, string> = new Map();
+  private storedDocId: string | null = null; // IndexedDB 存储的文档ID
 
   private downloadId: string = "";
   private downloadParts: Uint8Array[] = [];
@@ -69,9 +71,19 @@ export class EditorServer {
     const buffer = await file.arrayBuffer();
     this.loadPromise = this.loadDocument(buffer, this.fileType);
 
+    // 保存到 IndexedDB，生成持久化ID
+    try {
+      const storedId = await saveDocument(file, buffer);
+      this.storedDocId = storedId;
+      console.log(`[EditorServer] 文档已保存到本地存储: ${storedId}`);
+    } catch (err) {
+      console.error("[EditorServer] 保存文档失败:", err);
+    }
+
     return {
       id: this.id,
       documentType,
+      storedDocId: this.storedDocId,
     };
   }
 
@@ -110,6 +122,39 @@ export class EditorServer {
       id: this.id,
       documentType: documentType,
     };
+  }
+
+  /**
+   * 从 IndexedDB 恢复文档
+   */
+  async openFromStorage(docId: string) {
+    const storedDoc = await loadDocument(docId);
+    if (!storedDoc) {
+      throw new Error(`文档不存在: ${docId}`);
+    }
+
+    this.storedDocId = docId;
+    this.fileType = storedDoc.type;
+    this.title = storedDoc.name;
+    this.id = randomId();
+    
+    const documentType = getDocumentType(this.fileType);
+    this.file = createFileFromDocument(storedDoc);
+    
+    this.loadPromise = this.loadDocument(storedDoc.content, this.fileType);
+
+    return {
+      id: this.id,
+      documentType,
+      storedDocId: docId,
+    };
+  }
+
+  /**
+   * 获取存储的文档ID
+   */
+  getStoredDocId(): string | null {
+    return this.storedDocId;
   }
 
   async openUrl(

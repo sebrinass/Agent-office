@@ -19,8 +19,12 @@ export default function HomePage() {
           console.error("Failed to save dropped file to recent:", err);
         }
       }
-      const { id } = await server.open(file);
-      router.push(`/editor`);
+      const result = await server.open(file);
+      // 导航到编辑器，带上存储的文档ID
+      const editorUrl = result.storedDocId 
+        ? `/editor?doc=${result.storedDocId}` 
+        : `/editor`;
+      router.push(editorUrl);
     },
     [router, server],
   );

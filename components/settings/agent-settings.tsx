@@ -69,9 +69,14 @@ function ConfigSection({ title, icon, defaultOpen = false, children }: ConfigSec
 function GatewayConfigSection() {
   const gatewayUrl = useWebSocketStore((state) => state.gatewayUrl);
   const gatewayToken = useWebSocketStore((state) => state.gatewayToken);
+  const connectionMode = useWebSocketStore((state) => state.connectionMode);
   const autoConnect = useWebSocketStore((state) => state.autoConnect);
+  const status = useWebSocketStore((state) => state.status);
+  const connect = useWebSocketStore((state) => state.connect);
+  const reconnect = useWebSocketStore((state) => state.reconnect);
   const setGatewayUrl = useWebSocketStore((state) => state.setGatewayUrl);
   const setGatewayToken = useWebSocketStore((state) => state.setGatewayToken);
+  const setConnectionMode = useWebSocketStore((state) => state.setConnectionMode);
   const setAutoConnect = useWebSocketStore((state) => state.setAutoConnect);
 
   const [localUrl, setLocalUrl] = useState(gatewayUrl);
@@ -81,26 +86,67 @@ function GatewayConfigSection() {
   const handleSave = useCallback(() => {
     setGatewayUrl(localUrl);
     setGatewayToken(localToken);
+
+    // Apply updated connection settings immediately so the editor page
+    // doesn't keep using a stale connection instance until a manual refresh.
+    if (status === "connected" || status === "connecting") {
+      reconnect();
+    } else {
+      connect();
+    }
+
     setSaved(true);
     setTimeout(() => setSaved(false), 2000);
-  }, [localUrl, localToken, setGatewayUrl, setGatewayToken]);
+  }, [localUrl, localToken, status, connect, reconnect, setGatewayUrl, setGatewayToken]);
 
   const handleReset = useCallback(() => {
     setLocalUrl("ws://127.0.0.1:18789");
     setLocalToken("");
-  }, []);
+    setConnectionMode('websocket');
+  }, [setConnectionMode]);
 
   return (
     <ConfigSection title="Gateway 连接" icon={<Server className="w-4 h-4 text-primary" />} defaultOpen>
       <div className="space-y-3">
-        {/* WebSocket 地址 */}
+        {/* 连接模式选择 */}
         <div className="space-y-1">
-          <label className="text-xs text-text-secondary">WebSocket 地址</label>
+          <label className="text-xs text-text-secondary">连接模式</label>
+          <div className="flex gap-2">
+            <button
+              onClick={() => setConnectionMode('websocket')}
+              className={cn(
+                "flex-1 px-3 py-2 text-sm rounded-lg border transition-colors",
+                connectionMode === 'websocket'
+                  ? "bg-primary/10 border-primary text-primary"
+                  : "bg-background border-border text-foreground hover:bg-muted"
+              )}
+            >
+              WebSocket
+            </button>
+            <button
+              onClick={() => setConnectionMode('http-api')}
+              className={cn(
+                "flex-1 px-3 py-2 text-sm rounded-lg border transition-colors",
+                connectionMode === 'http-api'
+                  ? "bg-primary/10 border-primary text-primary"
+                  : "bg-background border-border text-foreground hover:bg-muted"
+              )}
+            >
+              HTTP API
+            </button>
+          </div>
+        </div>
+
+        {/* 地址输入 */}
+        <div className="space-y-1">
+          <label className="text-xs text-text-secondary">
+            {connectionMode === 'websocket' ? 'WebSocket 地址' : 'HTTP API 地址'}
+          </label>
           <input
             type="text"
             value={localUrl}
             onChange={(e) => setLocalUrl(e.target.value)}
-            placeholder="ws://127.0.0.1:18789"
+            placeholder={connectionMode === 'websocket' ? "ws://127.0.0.1:18789" : "http://127.0.0.1:18789"}
             className={cn(
               "w-full px-3 py-2 text-sm rounded-lg border border-border bg-background",
               "text-foreground placeholder:text-text-secondary",

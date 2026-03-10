@@ -2,13 +2,15 @@
  * Office-Website Channel Message Sender
  *
  * Handles sending messages from OpenClaw to the office-website frontend.
- * Supports rich text, code blocks, media files, and document operations.
+ * Supports rich text, code blocks, media files, document operations, and SSE streaming.
  *
  * @module channels/office-website/send
  */
 
-import type { OpenClawConfig } from "../../config/config.js";
-import type { DocumentContext } from "./api.js";
+import type { OpenClawConfig } from "../../config/config";
+import type { DocumentContext } from "./api";
+import { getSessionManager, getChannelRuntime } from "./api";
+import { maskSensitive, maskObject } from "./utils";
 
 /**
  * Message types that can be sent to office-website
@@ -176,9 +178,11 @@ export async function sendMessage(
       messageId: result.messageId,
     };
   } catch (error) {
+    // Mask sensitive information in error message
+    const errorMessage = error instanceof Error ? error.message : "Unknown error";
     return {
       success: false,
-      error: error instanceof Error ? error.message : "Unknown error",
+      error: maskSensitive(errorMessage),
     };
   }
 }
@@ -659,4 +663,435 @@ export function markdownToBlocks(markdown: string): RichTextBlock[] {
   }
 
   return blocks;
+}
+
+// ============================================================================
+// Gateway HTTP API Integration
+// ============================================================================
+
+/**
+ * Gateway HTTP API configuration
+ */
+interface GatewayConfig {
+  gatewayUrl: string;
+  gatewayToken: string;
+}
+
+/**
+ * Get Gateway configuration from OpenClaw config
+ */
+function getGatewayConfig(cfg: OpenClawConfig): GatewayConfig | null {
+  const channelConfig = cfg.channels?.["office-website"];
+  const gatewayUrl = channelConfig?.apiUrl || "http://localhost:18789";
+  const gatewayToken = channelConfig?.token;
+
+  if (!gatewayToken) {
+    return null;
+  }
+
+  return { gatewayUrl, gatewayToken };
+}
+
+/**
+ * Send message via Gateway HTTP API
+ *
+ * This function sends messages through the OpenClaw Gateway HTTP API
+ * instead of directly to a webhook URL.
+ */
+export async function sendMessageViaGateway(
+  cfg: OpenClawConfig,
+  options: SendOptions,
+): Promise<SendResult> {
+  const { sessionId, message, documentContext, replyToId } = options;
+
+  const gatewayConfig = getGatewayConfig(cfg);
+  if (!gatewayConfig) {
+    // Fallback to webhook URL if Gateway not configured
+    return sendMessage(cfg, options);
+  }
+
+  const { gatewayUrl, gatewayToken } = gatewayConfig;
+
+  // Prepare payload for Gateway API
+  const payload = {
+    sessionId,
+    message: {
+      ...message,
+      timestamp: Date.now(),
+      replyToId,
+    },
+    documentContext,
+  };
+
+  try {
+    // Send to Gateway API
+    const response = await fetch(`${gatewayUrl}/api/office-website/send`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${gatewayToken}`,
+      },
+      body: JSON.stringify(payload),
+    });
+
+    if (!response.ok) {
+      return {
+        success: false,
+        error: `Gateway returned ${response.status}: ${response.statusText}`,
+      };
+    }
+
+    const result = await response.json();
+    return {
+      success: true,
+      messageId: result.messageId,
+    };
+  } catch (error) {
+    // Mask sensitive information in error message
+    const errorMessage = error instanceof Error ? error.message : "Unknown error";
+    return {
+      success: false,
+      error: maskSensitive(errorMessage),
+    };
+  }
+}
+
+// ============================================================================
+// SSE Streaming Support
+// ============================================================================
+
+/**
+ * SSE Stream controller for managing streaming responses
+ */
+export class SSEStreamController {
+  private sessionId: string;
+  private streamId: string;
+  private cfg: OpenClawConfig;
+  private buffer: string[] = [];
+  private closed = false;
+
+  constructor(cfg: OpenClawConfig, sessionId: string, streamId?: string) {
+    this.cfg = cfg;
+    this.sessionId = sessionId;
+    this.streamId = streamId || `stream-${Date.now()}-${crypto.randomUUID().slice(0, 8)}`;
+  }
+
+  /**
+   * Get the stream ID
+   */
+  getStreamId(): string {
+    return this.streamId;
+  }
+
+  /**
+   * Send stream start event
+   */
+  async start(): Promise<SendResult> {
+    if (this.closed) {
+      return { success: false, error: "Stream already closed" };
+    }
+
+    // Store stream start in session
+    const sessionManager = getSessionManager();
+    if (sessionManager) {
+      const session = sessionManager.getSession(this.sessionId);
+      if (session) {
+        sessionManager.updateSession(this.sessionId, {
+          metadata: {
+            ...session.metadata,
+            activeStreamId: this.streamId,
+            streamStartedAt: Date.now(),
+          },
+        });
+      }
+    }
+
+    return sendStreamStart(this.cfg, this.sessionId, this.streamId);
+  }
+
+  /**
+   * Send a delta chunk
+   */
+  async sendDelta(delta: string): Promise<SendResult> {
+    if (this.closed) {
+      return { success: false, error: "Stream already closed" };
+    }
+
+    // Buffer the delta
+    this.buffer.push(delta);
+
+    return sendStreamDelta(this.cfg, this.sessionId, this.streamId, delta);
+  }
+
+  /**
+   * End the stream
+   */
+  async end(fullContent?: string): Promise<SendResult> {
+    if (this.closed) {
+      return { success: false, error: "Stream already closed" };
+    }
+
+    this.closed = true;
+
+    // Get full content from buffer if not provided
+    const content = fullContent || this.buffer.join("");
+
+    // Clear stream state from session
+    const sessionManager = getSessionManager();
+    if (sessionManager) {
+      const session = sessionManager.getSession(this.sessionId);
+      if (session) {
+        const { activeStreamId, streamStartedAt, ...restMetadata } = session.metadata as Record<string, unknown>;
+        sessionManager.updateSession(this.sessionId, {
+          metadata: restMetadata,
+        });
+
+        // Add assistant message to session
+        sessionManager.addMessage(this.sessionId, {
+          role: "assistant",
+          content,
+        });
+      }
+    }
+
+    return sendStreamEnd(this.cfg, this.sessionId, this.streamId, content);
+  }
+
+  /**
+   * Check if stream is closed
+   */
+  isClosed(): boolean {
+    return this.closed;
+  }
+
+  /**
+   * Get buffered content
+   */
+  getBufferedContent(): string {
+    return this.buffer.join("");
+  }
+}
+
+/**
+ * Create an SSE stream controller
+ */
+export function createSSEStream(
+  cfg: OpenClawConfig,
+  sessionId: string,
+  streamId?: string,
+): SSEStreamController {
+  return new SSEStreamController(cfg, sessionId, streamId);
+}
+
+/**
+ * Stream message content with automatic chunking
+ *
+ * This function sends a message in chunks via SSE streaming.
+ * Useful for long messages that need to be delivered incrementally.
+ */
+export async function streamMessage(
+  cfg: OpenClawConfig,
+  sessionId: string,
+  content: string,
+  options?: {
+    chunkSize?: number;
+    delayMs?: number;
+  },
+): Promise<SendResult> {
+  const { chunkSize = 500, delayMs = 50 } = options || {};
+
+  const stream = createSSEStream(cfg, sessionId);
+
+  // Start stream
+  const startResult = await stream.start();
+  if (!startResult.success) {
+    return startResult;
+  }
+
+  // Split content into chunks
+  const chunks: string[] = [];
+  for (let i = 0; i < content.length; i += chunkSize) {
+    chunks.push(content.slice(i, i + chunkSize));
+  }
+
+  // Send chunks with delay
+  for (const chunk of chunks) {
+    const deltaResult = await stream.sendDelta(chunk);
+    if (!deltaResult.success) {
+      return deltaResult;
+    }
+
+    if (delayMs > 0) {
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
+    }
+  }
+
+  // End stream
+  return stream.end(content);
+}
+
+/**
+ * Stream message from async iterator
+ *
+ * This function streams content from an async iterator (e.g., LLM response).
+ */
+export async function streamFromIterator(
+  cfg: OpenClawConfig,
+  sessionId: string,
+  iterator: AsyncIterable<string>,
+): Promise<SendResult> {
+  const stream = createSSEStream(cfg, sessionId);
+
+  // Start stream
+  const startResult = await stream.start();
+  if (!startResult.success) {
+    return startResult;
+  }
+
+  // Stream from iterator
+  try {
+    for await (const chunk of iterator) {
+      const deltaResult = await stream.sendDelta(chunk);
+      if (!deltaResult.success) {
+        return deltaResult;
+      }
+    }
+  } catch (error) {
+    // End stream with error
+    await stream.end();
+    const errorMessage = error instanceof Error ? error.message : "Stream error";
+    return {
+      success: false,
+      error: maskSensitive(errorMessage),
+    };
+  }
+
+  // End stream
+  return stream.end();
+}
+
+// ============================================================================
+// Link Preview Support
+// ============================================================================
+
+/**
+ * Link preview metadata
+ */
+export interface LinkPreview {
+  url: string;
+  title?: string;
+  description?: string;
+  image?: string;
+  siteName?: string;
+  favicon?: string;
+}
+
+/**
+ * Extract links from text
+ */
+export function extractLinks(text: string): string[] {
+  const urlRegex = /https?:\/\/[^\s<>"{}|\\^`\[\]]+/gi;
+  const matches = text.match(urlRegex);
+  return matches ? [...new Set(matches)] : [];
+}
+
+/**
+ * Fetch link preview metadata
+ */
+export async function fetchLinkPreview(url: string): Promise<LinkPreview | null> {
+  try {
+    const response = await fetch(url, {
+      method: "GET",
+      headers: {
+        "User-Agent": "OpenClaw-OfficeWebsite/1.0",
+      },
+    });
+
+    if (!response.ok) {
+      return null;
+    }
+
+    const html = await response.text();
+
+    // Extract metadata from HTML
+    const titleMatch = html.match(/<title[^>]*>([^<]+)<\/title>/i);
+    const descMatch = html.match(/<meta[^>]*name=["']description["'][^>]*content=["']([^"']+)["']/i);
+    const ogImageMatch = html.match(/<meta[^>]*property=["']og:image["'][^>]*content=["']([^"']+)["']/i);
+    const ogTitleMatch = html.match(/<meta[^>]*property=["']og:title["'][^>]*content=["']([^"']+)["']/i);
+    const ogDescMatch = html.match(/<meta[^>]*property=["']og:description["'][^>]*content=["']([^"']+)["']/i);
+    const ogSiteMatch = html.match(/<meta[^>]*property=["']og:site_name["'][^>]*content=["']([^"']+)["']/i);
+
+    return {
+      url,
+      title: ogTitleMatch?.[1] || titleMatch?.[1]?.trim(),
+      description: ogDescMatch?.[1] || descMatch?.[1]?.trim(),
+      image: ogImageMatch?.[1],
+      siteName: ogSiteMatch?.[1]?.trim(),
+    };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Send message with link previews
+ */
+export async function sendMessageWithLinkPreviews(
+  cfg: OpenClawConfig,
+  sessionId: string,
+  content: string,
+  options?: {
+    fetchPreviews?: boolean;
+    documentContext?: DocumentContext;
+  },
+): Promise<SendResult> {
+  const { fetchPreviews = true, documentContext } = options || {};
+
+  // Extract links
+  const links = extractLinks(content);
+
+  // Fetch previews if enabled
+  const previews: LinkPreview[] = [];
+  if (fetchPreviews && links.length > 0) {
+    const previewPromises = links.slice(0, 3).map((url) => fetchLinkPreview(url));
+    const results = await Promise.all(previewPromises);
+    previews.push(...results.filter((p): p is LinkPreview => p !== null));
+  }
+
+  // Build message with previews
+  const message: OutboundMessage = {
+    type: determineMessageType(content),
+    content,
+    metadata: {
+      format: "markdown",
+    },
+  };
+
+  // Add previews as attachments if any
+  if (previews.length > 0) {
+    message.metadata = {
+      ...message.metadata,
+      linkPreviews: previews,
+    };
+  }
+
+  return sendMessage(cfg, {
+    sessionId,
+    message,
+    documentContext,
+  });
+}
+
+/**
+ * Determine message type based on content
+ */
+function determineMessageType(content: string): MessageType {
+  // Check for markdown indicators
+  const hasMarkdown = /(^#{1,6}\s|`{3}|\[.+\]\(.+\)|\*.+\*|^[-*+]\s|^>\s|\|.+\|)/m.test(content);
+
+  if (hasMarkdown) {
+    return "markdown";
+  }
+
+  return "text";
 }

@@ -5,8 +5,13 @@
 
 // 连接管理
 export {
-  WebSocketConnection,
+  HttpConnection,
+  WebSocketConnectionImpl,
   createWebSocketConnection,
+  createHttpConnection,
+  createConnection,
+  type WebSocketConnection,
+  type UnifiedConnection,
   type ConnectionConfig,
   type ConnectionCallbacks,
 } from './connection';
@@ -40,4 +45,5 @@ export {
   selectError,
   selectIsConnected,
   selectIsConnecting,
+  selectConnectionMode,
 } from './store';

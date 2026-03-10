@@ -3,27 +3,33 @@
 import { useState, useCallback } from "react";
 import { Link, Unlink, Save, Loader2 } from "lucide-react";
 import { cn } from "@/lib/utils";
-import type { AgentConnectionStatus } from "@/types/agent";
+import type { AgentConnectionStatus, ConnectionMode } from "@/types/agent";
 
 interface GatewayConfigProps {
   // 当前 Gateway 地址
   gatewayUrl: string;
   // 连接状态
   connectionStatus: AgentConnectionStatus;
+  // 连接模式
+  connectionMode: ConnectionMode;
   // 连接回调
   onConnect: (url: string) => void;
   // 断开连接回调
   onDisconnect: () => void;
   // 保存配置回调
   onSave: (url: string) => void;
+  // 切换连接模式回调
+  onModeChange: (mode: ConnectionMode) => void;
 }
 
 export function GatewayConfig({
   gatewayUrl,
   connectionStatus,
+  connectionMode,
   onConnect,
   onDisconnect,
   onSave,
+  onModeChange,
 }: GatewayConfigProps) {
   const [inputUrl, setInputUrl] = useState(gatewayUrl);
   const [isSaving, setIsSaving] = useState(false);
@@ -78,16 +84,51 @@ export function GatewayConfig({
         <span>Gateway 配置</span>
       </div>
 
+      {/* 连接模式选择 */}
+      <div className="space-y-1">
+        <label className="text-xs text-text-secondary">连接模式</label>
+        <div className="flex gap-2">
+          <button
+            onClick={() => onModeChange('websocket')}
+            disabled={isConnected}
+            className={cn(
+              "flex-1 px-3 py-2 text-sm rounded-lg border transition-colors",
+              connectionMode === 'websocket'
+                ? "bg-primary/10 border-primary text-primary"
+                : "bg-background border-border text-foreground hover:bg-muted",
+              "disabled:opacity-50 disabled:cursor-not-allowed"
+            )}
+          >
+            WebSocket
+          </button>
+          <button
+            onClick={() => onModeChange('http-api')}
+            disabled={isConnected}
+            className={cn(
+              "flex-1 px-3 py-2 text-sm rounded-lg border transition-colors",
+              connectionMode === 'http-api'
+                ? "bg-primary/10 border-primary text-primary"
+                : "bg-background border-border text-foreground hover:bg-muted",
+              "disabled:opacity-50 disabled:cursor-not-allowed"
+            )}
+          >
+            HTTP API
+          </button>
+        </div>
+      </div>
+
       {/* URL 输入框 */}
       <div className="space-y-1">
-        <label className="text-xs text-text-secondary">WebSocket 地址</label>
+        <label className="text-xs text-text-secondary">
+          {connectionMode === 'websocket' ? 'WebSocket 地址' : 'HTTP API 地址'}
+        </label>
         <input
           type="text"
           value={inputUrl}
           onChange={handleUrlChange}
           onKeyDown={handleKeyDown}
           disabled={isConnected}
-          placeholder="ws://localhost:3000/gateway"
+          placeholder={connectionMode === 'websocket' ? "ws://localhost:18789" : "http://localhost:18789"}
           className={cn(
             "w-full px-3 py-2 text-sm rounded-lg border border-border bg-background",
             "text-foreground placeholder:text-text-secondary",
@@ -166,7 +207,9 @@ export function GatewayConfig({
 
       {/* 帮助提示 */}
       <div className="text-xs text-text-secondary">
-        输入 OpenClaw Gateway 的 WebSocket 地址，例如 ws://localhost:3000/gateway
+        {connectionMode === 'websocket' 
+          ? 'WebSocket 直连模式，适用于 Gateway 直接暴露 WebSocket 接口'
+          : 'HTTP API 模式，通过 ChannelPlugin 的 HTTP API 连接'}
       </div>
     </div>
   );

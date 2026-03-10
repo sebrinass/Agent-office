@@ -6,6 +6,9 @@ node_modules
 .next
 out
 
+# OpenClaw plugin (for OpenClaw environment, not for this project)
+channels
+
 # Development files
 *.log
 *.pid

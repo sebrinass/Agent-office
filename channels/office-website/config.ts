@@ -7,9 +7,9 @@
  */
 
 import type { OpenClawConfig } from "../../config/config.js";
-import type { ChannelConfigAdapter } from "../plugins/types.adapters.js";
+import type { ChannelConfigAdapter, ChannelAccountSnapshot } from "openclaw/plugin-sdk";
 import { z } from "zod";
-import { buildChannelConfigSchema } from "../plugins/config-schema.js";
+import { buildChannelConfigSchema } from "openclaw/plugin-sdk";
 
 /**
  * Office-Website account configuration schema
@@ -149,7 +149,7 @@ export const officeWebsiteConfig: ChannelConfigAdapter<ResolvedOfficeWebsiteAcco
   describeAccount: (
     account: ResolvedOfficeWebsiteAccount,
     _cfg: OpenClawConfig,
-  ): import("../plugins/types.core.js").ChannelAccountSnapshot => {
+  ): ChannelAccountSnapshot => {
     return {
       accountId: account.accountId,
       enabled: account.enabled,
@@ -165,4 +165,16 @@ export const officeWebsiteConfig: ChannelConfigAdapter<ResolvedOfficeWebsiteAcco
  */
 export function getOfficeWebsiteConfigSchema() {
   return buildChannelConfigSchema(OfficeWebsiteAccountSchema);
+}
+
+/**
+ * Resolve office-website account configuration
+ *
+ * Convenience function that wraps the config adapter's resolveAccount method.
+ */
+export function resolveOfficeWebsiteAccount(
+  cfg: OpenClawConfig,
+  accountId?: string | null,
+): ResolvedOfficeWebsiteAccount {
+  return officeWebsiteConfig.resolveAccount(cfg, accountId);
 }

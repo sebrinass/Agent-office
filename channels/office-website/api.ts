@@ -8,13 +8,14 @@
  */
 
 import type { IncomingMessage, ServerResponse } from "node:http";
-import type { OpenClawConfig } from "../../config/config.js";
-import type { ChannelGatewayContext } from "../plugins/types.adapters.js";
+import type { OpenClawConfig } from "../../config/config";
+import type { ChannelGatewayContext } from "openclaw/plugin-sdk";
 import { z } from "zod";
-import { authenticateRequest } from "./auth.js";
-import { SessionManager, type SessionMessage } from "./session.js";
-import { checkPermission } from "./permissions.js";
-import type { ResolvedOfficeWebsiteAccount } from "./config.js";
+import { authenticateRequest } from "./auth";
+import { SessionManager, type SessionMessage } from "./session";
+import { checkPermission } from "./permissions";
+import type { ResolvedOfficeWebsiteAccount } from "./config";
+import { maskSensitive } from "./utils";
 
 // ============================================================================
 // Zod Schemas for Request Validation (C-004 Fix)
@@ -219,6 +220,30 @@ function sendJson<T>(res: ServerResponse, status: number, data: T): void {
 }
 
 /**
+ * Set CORS headers for cross-origin requests
+ */
+function setCorsHeaders(res: ServerResponse): void {
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
+}
+
+/**
+ * Handle OPTIONS preflight request
+ * @returns true if request was handled as OPTIONS, false otherwise
+ */
+function handleOptionsRequest(req: IncomingMessage, res: ServerResponse): boolean {
+  if (req.method === "OPTIONS") {
+    setCorsHeaders(res);
+    res.setHeader("Access-Control-Max-Age", "86400");
+    res.statusCode = 204;
+    res.end();
+    return true;
+  }
+  return false;
+}
+
+/**
  * Extract Authorization header from request
  */
 function extractAuthHeader(req: IncomingMessage): string | undefined {
@@ -281,6 +306,7 @@ class SSEEncoder {
  * Create SSE stream connection
  */
 function createSSEStream(
+  req: IncomingMessage,
   res: ServerResponse,
   sessionId: string,
 ): {
@@ -290,12 +316,17 @@ function createSSEStream(
   const encoder = new SSEEncoder();
   let closed = false;
 
-  // Set SSE headers
+  // Set SSE headers with security headers
   res.statusCode = 200;
   res.setHeader("Content-Type", "text/event-stream");
-  res.setHeader("Cache-Control", "no-cache, no-transform");
+  res.setHeader("Cache-Control", "no-cache, no-transform, no-store");
   res.setHeader("Connection", "keep-alive");
   res.setHeader("X-Accel-Buffering", "no"); // Disable nginx buffering
+  
+  // Security headers to prevent common attacks
+  res.setHeader("X-Content-Type-Options", "nosniff");
+  res.setHeader("X-Frame-Options", "DENY");
+  res.setHeader("X-XSS-Protection", "1; mode=block");
 
   // Send initial connection event
   const connectEvent: SSEEvent = {
@@ -352,9 +383,6 @@ function createSSEStream(
     },
   };
 }
-
-// Reference to request for SSE cleanup
-let req: IncomingMessage;
 
 // ============================================================================
 // API Handlers
@@ -621,8 +649,14 @@ export async function handleMessageHttpRequest(
   res: ServerResponse,
   cfg: OpenClawConfig,
 ): Promise<boolean> {
-  req = request; // Store for SSE cleanup
-  
+  // Handle CORS preflight request
+  if (handleOptionsRequest(request, res)) {
+    return true;
+  }
+
+  // Set CORS headers for all responses
+  setCorsHeaders(res);
+
   if (request.method !== "POST") {
     sendJson(res, 405, { success: false, error: "Method Not Allowed" });
     return true;
@@ -655,8 +689,14 @@ export async function handleDocumentHttpRequest(
   res: ServerResponse,
   cfg: OpenClawConfig,
 ): Promise<boolean> {
-  req = request;
-  
+  // Handle CORS preflight request
+  if (handleOptionsRequest(request, res)) {
+    return true;
+  }
+
+  // Set CORS headers for all responses
+  setCorsHeaders(res);
+
   if (request.method !== "POST") {
     sendJson(res, 405, { success: false, error: "Method Not Allowed" });
     return true;
@@ -689,8 +729,14 @@ export async function handleHistoryHttpRequest(
   res: ServerResponse,
   cfg: OpenClawConfig,
 ): Promise<boolean> {
-  req = request;
-  
+  // Handle CORS preflight request
+  if (handleOptionsRequest(request, res)) {
+    return true;
+  }
+
+  // Set CORS headers for all responses
+  setCorsHeaders(res);
+
   if (request.method !== "GET") {
     sendJson(res, 405, { success: false, error: "Method Not Allowed" });
     return true;
@@ -727,8 +773,14 @@ export async function handleSessionHttpRequest(
   res: ServerResponse,
   cfg: OpenClawConfig,
 ): Promise<boolean> {
-  req = request;
-  
+  // Handle CORS preflight request
+  if (handleOptionsRequest(request, res)) {
+    return true;
+  }
+
+  // Set CORS headers for all responses
+  setCorsHeaders(res);
+
   if (request.method !== "GET") {
     sendJson(res, 405, { success: false, error: "Method Not Allowed" });
     return true;
@@ -761,8 +813,14 @@ export async function handlePingHttpRequest(
   res: ServerResponse,
   cfg: OpenClawConfig,
 ): Promise<boolean> {
-  req = request;
-  
+  // Handle CORS preflight request
+  if (handleOptionsRequest(request, res)) {
+    return true;
+  }
+
+  // Set CORS headers for all responses
+  setCorsHeaders(res);
+
   if (request.method !== "GET") {
     sendJson(res, 405, { success: false, error: "Method Not Allowed" });
     return true;
@@ -788,15 +846,26 @@ export async function handleStreamHttpRequest(
   res: ServerResponse,
   cfg: OpenClawConfig,
 ): Promise<boolean> {
-  req = request;
-  
+  // Handle CORS preflight request
+  if (handleOptionsRequest(request, res)) {
+    return true;
+  }
+
+  // Set CORS headers for all responses
+  setCorsHeaders(res);
+
   if (request.method !== "GET") {
     sendJson(res, 405, { success: false, error: "Method Not Allowed" });
     return true;
   }
 
   const url = new URL(request.url ?? "/", "http://localhost");
-  const sessionId = url.searchParams.get("sessionId") ?? "";
+  let sessionId = url.searchParams.get("sessionId") ?? "";
+
+  // Generate default sessionId if not provided
+  if (!sessionId) {
+    sessionId = `session-${Date.now()}-${crypto.randomUUID().slice(0, 8)}`;
+  }
 
   // Validate sessionId
   const validation = validateRequest(StreamRequestSchema, { sessionId });
@@ -814,7 +883,7 @@ export async function handleStreamHttpRequest(
   }
 
   // Create SSE stream
-  const { send, close } = createSSEStream(res, validation.data.sessionId);
+  const { send, close } = createSSEStream(request, res, validation.data.sessionId);
 
   // Get session and check if there's a pending message to process
   const manager = globalSessionManager;
@@ -895,7 +964,9 @@ export async function handleStreamHttpRequest(
       send({
         event: "error",
         data: {
-          message: error instanceof Error ? error.message : "Unknown error during streaming",
+          message: maskSensitive(
+            error instanceof Error ? error.message : "Unknown error during streaming",
+          ),
         },
       });
     }

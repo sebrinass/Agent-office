@@ -7,10 +7,10 @@
  * @module channels/office-website/memory-integration
  */
 
-import type { OpenClawConfig } from "../../config/config.js";
-import type { MemorySearchResult } from "../../memory/types.js";
-import type { SessionMessage, SessionState } from "./session.js";
-import type { DocumentContext } from "./api.js";
+import type { OpenClawConfig } from "../../config/config";
+import type { MemorySearchResult } from "../../memory/types";
+import type { SessionMessage, SessionState } from "./session";
+import type { DocumentContext } from "./api";
 
 /**
  * Memory integration configuration
